@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "talkhead-executor"
+version = "0.1.0"
+description = "Minimal stateful executor service for miner evaluation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.111",
+  "uvicorn>=0.30",
+  "pydantic>=2.7",
+  "python-dotenv>=1.0",
+  "bittensor",
+  "substrate-interface",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[tool.setuptools]
+py-modules = ["evaluator", "loop", "models", "state"]
