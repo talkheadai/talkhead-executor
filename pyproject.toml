@@ -22,5 +22,8 @@ dev = [
   "pytest>=8.0",
 ]
 
-[tool.setuptools]
-py-modules = ["evaluator", "loop", "models", "state"]
+[project.scripts]
+executor-service = "executor.app:run"
+
+[tool.setuptools.packages.find]
+where = ["."]

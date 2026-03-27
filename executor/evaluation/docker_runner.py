@@ -8,7 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from models import Challenge, ChallengeResult
+from executor.models import Challenge, ChallengeResult
 
 LOGGER = logging.getLogger(__name__)
 

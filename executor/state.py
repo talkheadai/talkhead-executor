@@ -7,7 +7,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
-from models import MinerRecord, MinerScoreResponse, MinerSubmission
+from executor.models import MinerRecord, MinerScoreResponse, MinerSubmission
 
 LOGGER = logging.getLogger(__name__)
 

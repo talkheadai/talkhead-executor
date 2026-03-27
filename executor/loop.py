@@ -10,10 +10,10 @@ from pathlib import Path
 
 import bittensor as bt
 
-from evaluator import evaluate, load_challenges_from_dir
-from models import Challenge
-from state import MinerState
-from verify import _http_json, signed_subnet_headers
+from executor.evaluation.docker_runner import evaluate, load_challenges_from_dir
+from executor.models import Challenge
+from executor.state import MinerState
+from executor.verify import _http_json, signed_subnet_headers
 
 LOGGER = logging.getLogger(__name__)
 
@@ -64,7 +64,6 @@ class EvaluationLoop:
 
             while not self._stop_event.is_set():
                 pending = self._state.get_pending_miners()
-                print(f"Pending miners: {len(pending)}")
                 if not pending:
                     if self._state.commit_round_if_complete():
                         LOGGER.info("round completed")
