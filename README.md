@@ -6,7 +6,7 @@ This service maintains an in-memory table of miner submissions, evaluates miners
 
 - `executor/` — installable package (`app`, `loop`, `state`, `models`, `verify`)
 - `executor/evaluation/` — Docker miner run and challenge orchestration (`docker_runner`)
-- `executor/scoring/` — reserved for output quality metrics (lipsync, identity, etc.)
+- `executor/scoring/` — multi-metric quality scoring (identity, lipsync, audio, video, temporal, penalties)
 
 ## Endpoints
 
@@ -26,6 +26,21 @@ Install dependencies from `pyproject.toml`:
 
 ```bash
 pip install -e .
+```
+
+## System Prerequisites (Scoring)
+
+For robust audio decoding in the scoring pipeline, install `ffmpeg` on the host:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ffmpeg
+```
+
+Then verify:
+
+```bash
+ffmpeg -version
 ```
 
 ## Run
@@ -56,3 +71,34 @@ uvicorn executor.app:app --host 0.0.0.0 --port 8000
 
 - State is held in memory and persisted to a local SQLite database (WAL mode)
 - Single process / single evaluation loop
+
+## GPU / Docker Troubleshooting
+
+If `nvidia-smi` shows `Failed to initialize NVML: Driver/library version mismatch`, your loaded NVIDIA kernel module does not match the installed NVIDIA user-space libraries.
+
+1. Reboot the host to load the current NVIDIA module:
+
+```bash
+sudo reboot
+```
+
+2. After reboot, verify GPU access:
+
+```bash
+nvidia-smi
+```
+
+3. If Docker shows `could not select device driver "" with capabilities: [[gpu]]`, install and configure NVIDIA Container Toolkit:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+4. Validate GPU access from containers:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+```

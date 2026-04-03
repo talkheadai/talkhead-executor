@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import json
-import logging
 import sqlite3
 import threading
 from dataclasses import replace
 from pathlib import Path
 
-from executor.models import MinerRecord, MinerScoreResponse, MinerSubmission
+from loguru import logger
 
-LOGGER = logging.getLogger(__name__)
+from executor.models import MinerRecord, MinerScoreResponse, MinerSubmission
 
 
 def _resolve_db_and_legacy_paths(state_file: Path) -> tuple[Path, Path | None]:
@@ -83,7 +82,7 @@ class MinerState:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
-            LOGGER.warning("failed to load legacy state file %s: %s", path, exc)
+            logger.warning(f"failed to load legacy state file {path}: {exc}")
             return {}
         return self._miners_from_json_payload(payload)
 
@@ -110,7 +109,7 @@ class MinerState:
                         score=float(score),
                         coming_score=float(coming_score),
                     )
-                LOGGER.info("loaded %s miners from sqlite", len(self._miners))
+                logger.info(f"loaded {len(self._miners)} miners from sqlite")
         finally:
             conn.close()
 
@@ -120,10 +119,8 @@ class MinerState:
                 with self._lock:
                     self._miners = loaded
                     self._save_locked()
-                LOGGER.info(
-                    "migrated %s miners from %s to sqlite",
-                    len(loaded),
-                    self._legacy_json_path,
+                logger.info(
+                    f"migrated {len(loaded)} miners from {self._legacy_json_path} to sqlite"
                 )
 
     def _save_locked(self) -> None:
@@ -161,7 +158,7 @@ class MinerState:
                         submit_time=submission.submit_time,
                     )
                     changed = True
-                    LOGGER.info("new miner added: hotkey=%s", submission.hotkey)
+                    logger.info(f"new miner added: hotkey={submission.hotkey}")
                     continue
 
                 if existing.image_ref != submission.image_ref:
@@ -173,10 +170,9 @@ class MinerState:
                         coming_score=-1.0,
                     )
                     changed = True
-                    LOGGER.info(
-                        "image_ref updated: hotkey=%s image_ref=%s",
-                        submission.hotkey,
-                        submission.image_ref,
+                    logger.info(
+                        f"image_ref updated: hotkey={submission.hotkey} "
+                        f"image_ref={submission.image_ref}"
                     )
                     continue
 
@@ -189,10 +185,9 @@ class MinerState:
                         coming_score=existing.coming_score,
                     )
                     changed = True
-                    LOGGER.info(
-                        "submit_time updated: hotkey=%s submit_time=%s",
-                        submission.hotkey,
-                        submission.submit_time,
+                    logger.info(
+                        f"submit_time updated: hotkey={submission.hotkey} "
+                        f"submit_time={submission.submit_time}"
                     )
             if changed:
                 self._save_locked()

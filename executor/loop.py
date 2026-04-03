@@ -2,20 +2,18 @@ from __future__ import annotations
 
 import base64
 import binascii
-import logging
 import os
 import threading
 import time
 from pathlib import Path
 
 import bittensor as bt
+from loguru import logger
 
 from executor.evaluation.docker_runner import evaluate, load_challenges_from_dir
 from executor.models import Challenge
 from executor.state import MinerState
 from executor.verify import _http_json, signed_subnet_headers
-
-LOGGER = logging.getLogger(__name__)
 
 SUBNET_API_URL = os.getenv("SUBNET_API_URL", "https://subnet.talkhead.ai")
 
@@ -58,7 +56,7 @@ class EvaluationLoop:
             try:
                 challenges = self._fetch_challenge()
             except Exception as exc:
-                LOGGER.exception("failed to fetch challenge: %s", exc)
+                logger.exception(f"failed to fetch challenge: {exc}")
                 time.sleep(self._idle_sleep_sec)
                 continue
 
@@ -66,24 +64,20 @@ class EvaluationLoop:
                 pending = self._state.get_pending_miners()
                 if not pending:
                     if self._state.commit_round_if_complete():
-                        LOGGER.info("round completed")
+                        logger.info("round completed")
                     break
 
                 for miner in pending:
                     print(f"Evaluating miner {miner.hotkey} {miner.image_ref}")
-                    LOGGER.info(
-                        "evaluation start: hotkey=%s image_ref=%s",
-                        miner.hotkey,
-                        miner.image_ref,
+                    logger.info(
+                        f"evaluation start: hotkey={miner.hotkey} image_ref={miner.image_ref}"
                     )
                     try:
                         score = evaluate(miner.image_ref, challenges)
                     except Exception as exc:
-                        LOGGER.exception(
-                            "evaluation failed: hotkey=%s image_ref=%s error=%s",
-                            miner.hotkey,
-                            miner.image_ref,
-                            exc,
+                        logger.exception(
+                            f"evaluation failed: hotkey={miner.hotkey} "
+                            f"image_ref={miner.image_ref} error={exc}"
                         )
                         score = PENALTY_SCORE
 
@@ -93,17 +87,14 @@ class EvaluationLoop:
                         coming_score=score,
                     )
                     if updated:
-                        LOGGER.info(
-                            "evaluation end: hotkey=%s image_ref=%s coming_score=%s",
-                            miner.hotkey,
-                            miner.image_ref,
-                            score,
+                        logger.info(
+                            f"evaluation end: hotkey={miner.hotkey} "
+                            f"image_ref={miner.image_ref} coming_score={score}"
                         )
                     else:
-                        LOGGER.info(
-                            "evaluation discarded due to updated submission: hotkey=%s image_ref=%s",
-                            miner.hotkey,
-                            miner.image_ref,
+                        logger.info(
+                            f"evaluation discarded due to updated submission: "
+                            f"hotkey={miner.hotkey} image_ref={miner.image_ref}"
                         )
 
     def _fetch_challenge(self) -> list[Challenge]:
@@ -113,7 +104,7 @@ class EvaluationLoop:
             headers=signed_subnet_headers(self.wallet, "/challenge"),
         )
         challenges = _parse_challenge_payload(payload)
-        LOGGER.info("new challenge fetched: count=%s", len(challenges))
+        logger.info(f"new challenge fetched: count={len(challenges)}")
         return challenges
 
 
@@ -137,10 +128,15 @@ def _decode_base64(raw: object) -> bytes | None:
     s = raw.strip()
     if s.startswith("data:") and "," in s:
         s = s.split(",", 1)[1].strip()
-    for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+    # Normalize padding to avoid accepting malformed payload silently.
+    if len(s) % 4:
+        s = s + ("=" * (4 - (len(s) % 4)))
+    for altchars in (None, b"-_"):
         try:
-            return decoder(s, validate=False)
-        except binascii.Error:
+            decoded = base64.b64decode(s, altchars=altchars, validate=True)
+            if decoded:
+                return decoded
+        except (binascii.Error, ValueError):
             continue
     return None
 

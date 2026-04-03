@@ -1,21 +1,23 @@
 from __future__ import annotations
 
 import json
-import logging
 import shutil
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 
-from executor.models import Challenge, ChallengeResult
+from loguru import logger
 
-LOGGER = logging.getLogger(__name__)
+from executor.models import Challenge, ChallengeResult
+from executor.scoring import score_video
 
 READY_TIMEOUT_SEC = 600
 CHALLENGE_TIMEOUT_SEC = 120
 WARMUP_COUNT = 0
 SCORING_COUNT = 1
+PULL_IMAGE_MAX_RETRIES = 5
+PULL_IMAGE_RETRY_SLEEP_SEC = 2.0
 
 
 def _safe_remove(path: Path) -> None:
@@ -27,6 +29,18 @@ def _safe_remove(path: Path) -> None:
 
 def _avg(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def _infer_audio_extension(audio_bytes: bytes) -> str:
+    if audio_bytes.startswith(b"RIFF") and len(audio_bytes) >= 12 and audio_bytes[8:12] == b"WAVE":
+        return ".wav"
+    if audio_bytes.startswith(b"ID3") or (len(audio_bytes) >= 2 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xE0) == 0xE0):
+        return ".mp3"
+    if audio_bytes.startswith(b"OggS"):
+        return ".ogg"
+    if audio_bytes.startswith(b"fLaC"):
+        return ".flac"
+    return ".bin"
 
 
 def _load_challenges(challenges_dir: str) -> list[Challenge]:
@@ -51,9 +65,22 @@ def _load_challenges(challenges_dir: str) -> list[Challenge]:
     return challenges
 
 
-def pull_image(image_ref: str) -> None:
-    subprocess.run(["docker", "pull", image_ref], check=True)
-
+def pull_image(image_ref: str) -> bool:
+    for attempt in range(1, PULL_IMAGE_MAX_RETRIES + 1):
+        try:
+            subprocess.run(["docker", "pull", image_ref], check=True)
+            if attempt > 1:
+                logger.info(f"docker pull succeeded on retry {attempt}/{PULL_IMAGE_MAX_RETRIES}: {image_ref}")
+            return True
+        except Exception as exc:
+            logger.warning(
+                f"docker pull failed attempt {attempt}/{PULL_IMAGE_MAX_RETRIES} "
+                f"for image={image_ref}: {exc}"
+            )
+            if attempt < PULL_IMAGE_MAX_RETRIES:
+                time.sleep(PULL_IMAGE_RETRY_SLEEP_SEC)
+    logger.error(f"docker pull failed after {PULL_IMAGE_MAX_RETRIES} attempts: {image_ref}")
+    return False
 
 def start_container(image_ref: str, job_dir: str) -> str:
     job_path = Path(job_dir)
@@ -199,15 +226,44 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> float:
     container_id: str | None = None
     warmup_results: list[ChallengeResult] = []
     scoring_results: list[ChallengeResult] = []
+    scoring_quality: list[float] = []
     try:
-        LOGGER.info("pulling image: %s", image_ref)
-        pull_image(image_ref)
+        logger.info(f"pulling image: {image_ref}")
+        if not pull_image(image_ref):
+            return 0.0
         container_id = start_container(image_ref, str(job_dir))
         wait_for_ready(str(job_dir), READY_TIMEOUT_SEC)
         for challenge in warmup_challenges:
             warmup_results.append(_send_challenge(job_dir, challenge))
         for challenge in scoring_challenges:
-            scoring_results.append(_send_challenge(job_dir, challenge))
+            result = _send_challenge(job_dir, challenge)
+            scoring_results.append(result)
+            if result.success:
+                output_video = job_dir / "output" / f"{challenge.challenge_id}.mp4"
+                if output_video.exists():
+                    face_tmp = job_dir / "input" / f"face_{challenge.challenge_id}.png"
+                    audio_ext = _infer_audio_extension(challenge.audio_bytes)
+                    audio_tmp = job_dir / "input" / f"audio_{challenge.challenge_id}{audio_ext}"
+                    face_tmp.write_bytes(challenge.face_bytes)
+                    audio_tmp.write_bytes(challenge.audio_bytes)
+                    try:
+                        score_obj = score_video(
+                            video_path=str(output_video),
+                            reference_image_path=str(face_tmp),
+                            audio_path=str(audio_tmp),
+                            expected_transcript=challenge.text or None,
+                        )
+                        scoring_quality.append(float(score_obj.get("final", 0.0)))
+                    except Exception as exc:
+                        logger.warning(
+                            f"quality scoring failed challenge={challenge.challenge_id} "
+                            f"image_ref={image_ref} err={exc}"
+                        )
+                        scoring_quality.append(0.0)
+                    finally:
+                        pass
+                        _safe_remove(face_tmp)
+                        _safe_remove(audio_tmp)
     finally:
         if container_id:
             stop_container(container_id)
@@ -218,8 +274,9 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> float:
         errors = ", ".join(f"{r.challenge_id}:{r.error}" for r in failures)
         raise RuntimeError(f"challenge failures: {errors}")
 
-    scoring_times = [r.host_time_sec for r in scoring_results]
-    return _avg(scoring_times)
+    if not scoring_quality:
+        return 0.0
+    return _avg(scoring_quality)
 
 
 def load_challenges_from_dir(challenges_dir: str) -> list[Challenge]:
