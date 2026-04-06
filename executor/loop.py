@@ -10,7 +10,7 @@ from pathlib import Path
 import bittensor as bt
 from loguru import logger
 
-from executor.evaluation.docker_runner import evaluate, load_challenges_from_dir
+from executor.evaluation.docker_runner import evaluate, load_challenges_from_dir, stop_all_running_containers
 from executor.models import Challenge
 from executor.state import MinerState
 from executor.verify import _http_json, signed_subnet_headers
@@ -44,6 +44,7 @@ class EvaluationLoop:
 
     def stop(self) -> None:
         self._stop_event.set()
+        stop_all_running_containers()
         if self._thread:
             self._thread.join(timeout=5)
 

@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -18,6 +19,10 @@ WARMUP_COUNT = 0
 SCORING_COUNT = 1
 PULL_IMAGE_MAX_RETRIES = 5
 PULL_IMAGE_RETRY_SLEEP_SEC = 2.0
+EVALUATION_CONTAINER_LABEL = "talkhead.executor.evaluation=true"
+
+_ACTIVE_CONTAINERS: set[str] = set()
+_ACTIVE_CONTAINERS_LOCK = threading.Lock()
 
 
 def _safe_remove(path: Path) -> None:
@@ -95,12 +100,14 @@ def start_container(image_ref: str, job_dir: str) -> str:
         "--gpus",
         "all",
         "--network=none",
-        "--cpus=8",
+        "--cpus=7",
         "--memory=16g",
         "--pids-limit=256",
         "--read-only",
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
+        "--label",
+        EVALUATION_CONTAINER_LABEL,
         "--tmpfs",
         "/tmp:rw,nosuid,nodev,noexec,size=1g",
         "--tmpfs",
@@ -139,6 +146,43 @@ def wait_for_ready(job_dir: str, timeout_sec: int) -> None:
 
 def stop_container(container_id: str) -> None:
     subprocess.run(["docker", "kill", container_id], check=False)
+    with _ACTIVE_CONTAINERS_LOCK:
+        _ACTIVE_CONTAINERS.discard(container_id)
+
+
+def stop_all_running_containers() -> None:
+    container_ids: list[str] = []
+    try:
+        res = subprocess.run(
+            [
+                "docker",
+                "ps",
+                "-q",
+                "--filter",
+                f"label={EVALUATION_CONTAINER_LABEL}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if res.stdout.strip():
+            container_ids.extend([line.strip() for line in res.stdout.splitlines() if line.strip()])
+    except Exception as exc:
+        logger.warning(f"failed to list running evaluation containers: {exc}")
+
+    with _ACTIVE_CONTAINERS_LOCK:
+        container_ids.extend(_ACTIVE_CONTAINERS)
+
+    deduped_ids = list(dict.fromkeys(container_ids))
+    for cid in deduped_ids:
+        stop_container(cid)
+
+
+def remove_all_images() -> None:
+    try:
+        subprocess.run(["docker", "image", "prune", "-a", "-f"], check=False)
+    except Exception as exc:
+        logger.warning(f"failed to prune docker images: {exc}")
 
 
 def _send_challenge(job_dir: Path, challenge: Challenge) -> ChallengeResult:
@@ -232,6 +276,8 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> float:
         if not pull_image(image_ref):
             return 0.0
         container_id = start_container(image_ref, str(job_dir))
+        with _ACTIVE_CONTAINERS_LOCK:
+            _ACTIVE_CONTAINERS.add(container_id)
         wait_for_ready(str(job_dir), READY_TIMEOUT_SEC)
         for challenge in warmup_challenges:
             warmup_results.append(_send_challenge(job_dir, challenge))
@@ -268,6 +314,7 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> float:
         if container_id:
             stop_container(container_id)
         shutil.rmtree(job_dir, ignore_errors=True)
+        remove_all_images()
 
     failures = [r for r in warmup_results + scoring_results if not r.success]
     if failures:
