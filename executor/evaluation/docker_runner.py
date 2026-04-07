@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +12,7 @@ from pathlib import Path
 from loguru import logger
 
 from executor.models import Challenge, ChallengeResult
+from executor.scoring.efficiency import EfficiencyConfig, aggregate_efficiency_scores
 from executor.scoring import score_video
 
 READY_TIMEOUT_SEC = 600
@@ -46,6 +48,151 @@ def _infer_audio_extension(audio_bytes: bytes) -> str:
     if audio_bytes.startswith(b"fLaC"):
         return ".flac"
     return ".bin"
+
+
+def _safe_float_or_none(value: object) -> float | None:
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if out < 0:
+        return None
+    return out
+
+
+def _container_host_pids(container_id: str) -> set[int]:
+    """
+    Return host PIDs for processes inside this container.
+    Best effort: empty set if lookup fails.
+    """
+    try:
+        res = subprocess.run(
+            ["docker", "top", container_id, "-eo", "pid"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode != 0:
+            return set()
+        pids: set[int] = set()
+        for line in res.stdout.splitlines():
+            s = line.strip()
+            if not s or s.lower() == "pid":
+                continue
+            try:
+                pids.add(int(s))
+            except ValueError:
+                continue
+        return pids
+    except Exception:
+        return set()
+
+
+def _gpu_memory_by_pid_mib() -> dict[int, float]:
+    """
+    Query active CUDA process memory via nvidia-smi.
+    Returns {host_pid: used_gpu_memory_mib}.
+    """
+    try:
+        res = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode != 0:
+            return {}
+        out: dict[int, float] = {}
+        for line in res.stdout.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[0])
+                mib = float(parts[1])
+            except ValueError:
+                continue
+            if pid >= 0 and mib >= 0:
+                out[pid] = mib
+        return out
+    except Exception:
+        return {}
+
+
+class _ContainerVramPeakMonitor:
+    """
+    Best-effort host-side VRAM monitor for one container.
+    Samples active CUDA memory and tracks max total MiB across container PIDs.
+    """
+
+    def __init__(self, container_id: str, interval_sec: float) -> None:
+        self.container_id = container_id
+        self.interval_sec = max(0.05, interval_sec)
+        self.peak_mib = 0.0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True, name="vram-peak-monitor")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            container_pids = _container_host_pids(self.container_id)
+            if container_pids:
+                gpu_by_pid = _gpu_memory_by_pid_mib()
+                total_mib = sum(gpu_by_pid.get(pid, 0.0) for pid in container_pids)
+                if total_mib > self.peak_mib:
+                    self.peak_mib = total_mib
+            self._stop.wait(self.interval_sec)
+
+
+def _extract_efficiency_metrics(
+    result_data: dict,
+    *,
+    elapsed_host_time_sec: float,
+    executor_peak_vram_gb: float | None,
+) -> tuple[float | None, float | None, str]:
+    """
+    Preferred source is miner-reported metrics inside `result.json`.
+    Fallback: host wall-clock challenge time (proxy; may include lightweight file IPC).
+    """
+    efficiency_block = result_data.get("efficiency")
+    if not isinstance(efficiency_block, dict):
+        efficiency_block = {}
+
+    if executor_peak_vram_gb is not None:
+        peak_vram_gb = max(0.0, executor_peak_vram_gb)
+
+    inference_time_sec = _safe_float_or_none(efficiency_block.get("inference_time_sec"))
+    if inference_time_sec is None:
+        inference_time_sec = _safe_float_or_none(result_data.get("inference_time_sec"))
+
+    measurement_source = str(efficiency_block.get("measurement_source") or "").strip()
+    if peak_vram_gb is not None or inference_time_sec is not None:
+        if not measurement_source:
+            measurement_source = "miner_json"
+        return peak_vram_gb, inference_time_sec, measurement_source
+
+    if executor_peak_vram_gb is not None:
+        peak_vram_gb = max(0.0, executor_peak_vram_gb)
+        logger.info(f"elapsed_host_time_sec: {elapsed_host_time_sec}")
+        return peak_vram_gb, max(0.0, elapsed_host_time_sec), "executor_nvidia_smi_fallback"
+
+    else:
+        return None, max(0.0, elapsed_host_time_sec), "executor_host_wall_clock_fallback"
+    return None, None, "unavailable"
 
 
 def _load_challenges(challenges_dir: str) -> list[Challenge]:
@@ -185,7 +332,13 @@ def remove_all_images() -> None:
         logger.warning(f"failed to prune docker images: {exc}")
 
 
-def _send_challenge(job_dir: Path, challenge: Challenge) -> ChallengeResult:
+def _send_challenge(
+    job_dir: Path,
+    challenge: Challenge,
+    *,
+    container_id: str | None = None,
+    measure_executor_vram_peak: bool = False,
+) -> ChallengeResult:
     input_dir = job_dir / "input"
     output_dir = job_dir / "output"
 
@@ -216,26 +369,47 @@ def _send_challenge(job_dir: Path, challenge: Challenge) -> ChallengeResult:
 
     start = time.perf_counter()
     deadline = time.time() + CHALLENGE_TIMEOUT_SEC
+    vram_monitor: _ContainerVramPeakMonitor | None = None
+    if measure_executor_vram_peak and container_id:
+        vram_monitor = _ContainerVramPeakMonitor(
+            container_id=container_id,
+            interval_sec=0.1,
+        )
+        vram_monitor.start()
 
-    while time.time() < deadline:
-        if result_json_path.exists():
-            elapsed = time.perf_counter() - start
-            try:
-                result_data = json.loads(result_json_path.read_text(encoding="utf-8"))
-            except Exception:
-                result_data = {}
-            success = bool(result_data.get("success", False))
-            error = result_data.get("error")
-            _safe_remove(task_path)
-            _safe_remove(face_dst)
-            _safe_remove(audio_dst)
-            return ChallengeResult(
-                challenge_id=challenge.challenge_id,
-                success=success,
-                host_time_sec=elapsed,
-                error=error,
-            )
-        time.sleep(0.1)
+    try:
+        while time.time() < deadline:
+            if result_json_path.exists():
+                elapsed = time.perf_counter() - start
+                try:
+                    result_data = json.loads(result_json_path.read_text(encoding="utf-8"))
+                except Exception:
+                    result_data = {}
+                success = bool(result_data.get("success", False))
+                error = result_data.get("error")
+                peak_vram_gb, inference_time_sec, efficiency_source = _extract_efficiency_metrics(
+                    result_data=result_data,
+                    elapsed_host_time_sec=elapsed,
+                    executor_peak_vram_gb=(
+                        (vram_monitor.peak_mib / 1024.0) if vram_monitor and vram_monitor.peak_mib > 0 else None
+                    ),
+                )
+                _safe_remove(task_path)
+                _safe_remove(face_dst)
+                _safe_remove(audio_dst)
+                return ChallengeResult(
+                    challenge_id=challenge.challenge_id,
+                    success=success,
+                    host_time_sec=elapsed,
+                    error=error,
+                    peak_vram_gb=peak_vram_gb,
+                    inference_time_sec=inference_time_sec,
+                    efficiency_source=efficiency_source,
+                )
+            time.sleep(0.1)
+    finally:
+        if vram_monitor:
+            vram_monitor.stop()
 
     elapsed = time.perf_counter() - start
     _safe_remove(task_path)
@@ -246,6 +420,13 @@ def _send_challenge(job_dir: Path, challenge: Challenge) -> ChallengeResult:
         success=False,
         host_time_sec=elapsed,
         error=f"timeout_{CHALLENGE_TIMEOUT_SEC}s",
+        peak_vram_gb=(vram_monitor.peak_mib / 1024.0) if vram_monitor and vram_monitor.peak_mib > 0 else None,
+        inference_time_sec=max(0.0, elapsed),
+        efficiency_source=(
+            "executor_nvidia_smi_fallback"
+            if vram_monitor and vram_monitor.peak_mib > 0
+            else "executor_host_wall_clock_fallback"
+        ),
     )
 
 
@@ -271,6 +452,9 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> float:
     warmup_results: list[ChallengeResult] = []
     scoring_results: list[ChallengeResult] = []
     scoring_quality: list[float] = []
+    scoring_peak_vram_gb: list[float | None] = []
+    scoring_inference_sec: list[float | None] = []
+    eff_cfg = EfficiencyConfig.from_env()
     try:
         logger.info(f"pulling image: {image_ref}")
         if not pull_image(image_ref):
@@ -280,10 +464,25 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> float:
             _ACTIVE_CONTAINERS.add(container_id)
         wait_for_ready(str(job_dir), READY_TIMEOUT_SEC)
         for challenge in warmup_challenges:
-            warmup_results.append(_send_challenge(job_dir, challenge))
+            warmup_results.append(
+                _send_challenge(
+                    job_dir,
+                    challenge,
+                    container_id=container_id,
+                    measure_executor_vram_peak=False,
+                )
+            )
         for challenge in scoring_challenges:
-            result = _send_challenge(job_dir, challenge)
+            result = _send_challenge(
+                job_dir,
+                challenge,
+                container_id=container_id,
+                measure_executor_vram_peak=True,
+            )
+            logger.info(f"scoring challenge {challenge.challenge_id} result: {result}")
             scoring_results.append(result)
+            scoring_peak_vram_gb.append(result.peak_vram_gb)
+            scoring_inference_sec.append(result.inference_time_sec)
             if result.success:
                 output_video = job_dir / "output" / f"{challenge.challenge_id}.mp4"
                 if output_video.exists():
@@ -298,8 +497,12 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> float:
                             reference_image_path=str(face_tmp),
                             audio_path=str(audio_tmp),
                             expected_transcript=challenge.text or None,
+                            peak_vram_gb=result.peak_vram_gb,
+                            inference_time_sec=result.inference_time_sec,
+                            efficiency_source=result.efficiency_source,
+                            efficiency_config=eff_cfg,
                         )
-                        scoring_quality.append(float(score_obj.get("final", 0.0)))
+                        scoring_quality.append(float(score_obj.get("quality_score", score_obj.get("final", 0.0))))
                     except Exception as exc:
                         logger.warning(
                             f"quality scoring failed challenge={challenge.challenge_id} "
@@ -323,7 +526,23 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> float:
 
     if not scoring_quality:
         return 0.0
-    return _avg(scoring_quality)
+    mean_quality = _avg(scoring_quality)
+    eff = aggregate_efficiency_scores(
+        per_challenge_peak_vram_gb=scoring_peak_vram_gb,
+        per_challenge_inference_sec=scoring_inference_sec,
+        mean_quality=mean_quality,
+        cfg=eff_cfg,
+    )
+    logger.info(
+        "efficiency aggregate: "
+        f"mean_quality={mean_quality:.6f} "
+        f"peak_vram_gb={eff.get('peak_vram_gb')} "
+        f"inference_time_sec={eff.get('inference_time_sec')} "
+        f"time_norm={eff.get('time_norm')} vram_norm={eff.get('vram_norm')} "
+        f"efficiency_factor={eff.get('efficiency_factor')} "
+        f"cap_violation={eff.get('cap_violation')}"
+    )
+    return float(eff.get("final_score", mean_quality))
 
 
 def load_challenges_from_dir(challenges_dir: str) -> list[Challenge]:

@@ -19,6 +19,9 @@ class ChallengeResult:
     success: bool
     host_time_sec: float
     error: str | None = None
+    peak_vram_gb: float | None = None
+    inference_time_sec: float | None = None
+    efficiency_source: str | None = None
 
 
 @dataclass

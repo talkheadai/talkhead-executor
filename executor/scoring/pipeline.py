@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from loguru import logger
+from executor.scoring.efficiency import EfficiencyConfig, aggregate_efficiency_scores
 from executor.scoring.audio import compute_audio_score
 from executor.scoring.identity import compute_identity_score
 from executor.scoring.lipsync import compute_lipsync_score
@@ -39,6 +40,11 @@ def score_video(
     reference_image_path: str,
     audio_path: str,
     expected_transcript: Optional[str],
+    *,
+    peak_vram_gb: float | None = None,
+    inference_time_sec: float | None = None,
+    efficiency_source: str | None = None,
+    efficiency_config: EfficiencyConfig | None = None,
 ) -> dict:
     """
     Score a talking-head generation output with multi-metric evaluation.
@@ -51,7 +57,9 @@ def score_video(
       "video": float,
       "temporal": float,
       "penalty": float,
+      "quality_score": float,
       "final": float,
+      "efficiency": {...},
       "debug": {...}
     }
     """
@@ -155,7 +163,7 @@ def score_video(
         gate *= 0.2
 
     if wer > 0.60:
-        final_score = 0.0
+        quality_score = 0.0
     else:
         blended = (
             0.35 * identity_score
@@ -165,7 +173,17 @@ def score_video(
             + 0.05 * float(temporal.get("temporal", 0.0))
             - float(penalties.get("penalty", 1.0))
         )
-        final_score = clamp01(gate * blended)
+        quality_score = clamp01(gate * blended)
+
+    cfg = efficiency_config or EfficiencyConfig.from_env()
+    efficiency = aggregate_efficiency_scores(
+        per_challenge_peak_vram_gb=[peak_vram_gb],
+        per_challenge_inference_sec=[inference_time_sec],
+        mean_quality=quality_score,
+        cfg=cfg,
+    )
+    if efficiency_source and efficiency.get("measurement_source") == "miner_json":
+        efficiency["measurement_source"] = efficiency_source
 
     out = {
         "identity": clamp01(identity_score),
@@ -174,7 +192,17 @@ def score_video(
         "video": clamp01(float(video.get("video", 0.0))),
         "temporal": clamp01(float(temporal.get("temporal", 0.0))),
         "penalty": clamp01(float(penalties.get("penalty", 1.0))),
-        "final": clamp01(final_score),
+        "quality_score": clamp01(quality_score),
+        "final": clamp01(float(efficiency.get("final_score", quality_score))),
+        "efficiency": {
+            "peak_vram_gb": efficiency.get("peak_vram_gb"),
+            "inference_time_sec": efficiency.get("inference_time_sec"),
+            "time_norm": max(0.0, min(3.0, float(efficiency.get("time_norm", 0.0)))),
+            "vram_norm": max(0.0, min(3.0, float(efficiency.get("vram_norm", 0.0)))),
+            "efficiency_factor": clamp01(float(efficiency.get("efficiency_factor", 1.0))),
+            "measurement_source": efficiency.get("measurement_source"),
+            "cap_violation": bool(efficiency.get("cap_violation", False)),
+        },
         "debug": {
             "sync_c": clamp01(sync_c),
             "sync_d": clamp01(float(lipsync.get("sync_d", 1.0))),

@@ -67,6 +67,35 @@ uvicorn executor.app:app --host 0.0.0.0 --port 8000
 - `PORT` (default: `8000`)
 - `STATE_FILE` (default: `./state.db`) — SQLite database path. If you previously used `./state.json`, set `STATE_FILE` to that path once: on first run the service creates `state.db` next to it and imports rows from the JSON file.
 
+## Efficiency Scoring
+
+- Final scoring is quality-first with a soft efficiency modifier: `final_score = quality_score * efficiency_factor`.
+- `efficiency_factor = exp(-0.15 * time_norm - 0.10 * vram_norm)`.
+- Normalization is robust and clamped (`time_norm`, `vram_norm` in `[0, 3]`).
+- Preferred metric source is miner-reported `result.json` fields:
+  - `efficiency.peak_vram_gb`
+  - `efficiency.inference_time_sec`
+- Limitation: executor cannot read container-internal PyTorch CUDA peak memory directly, so VRAM must be reported by the miner for accurate measurement.
+- Fallback behavior:
+  - Inference time can fall back to executor-observed wall-clock challenge time.
+  - Peak VRAM can fall back to executor-observed `nvidia-smi` process memory for container PIDs.
+  - This fallback excludes image pull and container startup (evaluation starts after ready), but may include lightweight file IPC/polling overhead.
+- Optional tie-break helper is available in `executor.scoring.efficiency.should_prefer_candidate_a`: if two scores are within `EFFICIENCY_TIE_QUALITY_EPSILON`, lower inference time wins first, then lower peak VRAM.
+
+Per-video score output now includes:
+
+```json
+{
+  "efficiency": {
+    "peak_vram_gb": 0.0,
+    "inference_time_sec": 0.0,
+    "time_norm": 0.0,
+    "vram_norm": 0.0,
+    "efficiency_factor": 1.0
+  }
+}
+```
+
 ## Notes
 
 - State is held in memory and persisted to a local SQLite database (WAL mode)
