@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -29,8 +30,8 @@ class MinerRecord:
     hotkey: str
     image_ref: str
     submit_time: float
-    score: float = -1.0
-    coming_score: float = -1.0
+    metrics: dict[str, Any] | None = field(default=None)
+    coming_metrics: dict[str, Any] | None = field(default=None)
 
 
 class MinerSubmission(BaseModel):
@@ -39,9 +40,8 @@ class MinerSubmission(BaseModel):
     submit_time: float
 
 
-class MinerScoreResponse(BaseModel):
+class MinerMetricsResponse(BaseModel):
     hotkey: str
     image_ref: str
     submit_time: float
-    score: float
-    coming_score: float
+    metrics: dict[str, Any] | None = None

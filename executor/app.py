@@ -5,10 +5,10 @@ from typing import AsyncIterator
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Header, Response, status
 
 from executor.loop import EvaluationLoop
-from executor.models import MinerScoreResponse, MinerSubmission
+from executor.models import MinerMetricsResponse, MinerSubmission
 from executor.state import MinerState
 from executor.verify import verify_validator_signature
 
@@ -56,9 +56,15 @@ def update(submissions: list[MinerSubmission]) -> dict[str, int]:
     return {"count": len(submissions)}
 
 
-@app.get("/scores", response_model=list[MinerScoreResponse], dependencies=[Depends(verify_validator_signature)])
-def score() -> list[MinerScoreResponse]:
-    return state.list_scores()
+@app.get("/metrics", response_model=list[MinerMetricsResponse], dependencies=[Depends(verify_validator_signature)])
+def metrics(response: Response, if_none_match: str | None = Header(default=None, alias="If-None-Match")) -> list[MinerMetricsResponse] | Response:
+    rows, etag = state.list_metrics_with_etag()
+    response.headers["ETag"] = etag
+    if if_none_match:
+        candidates = {part.strip() for part in if_none_match.split(",") if part.strip()}
+        if etag in candidates or "*" in candidates:
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
+    return rows
 
 
 def run() -> None:

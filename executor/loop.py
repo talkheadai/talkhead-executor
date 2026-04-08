@@ -73,24 +73,33 @@ class EvaluationLoop:
                     logger.info(
                         f"evaluation start: hotkey={miner.hotkey} image_ref={miner.image_ref}"
                     )
+                    metrics_payload: dict | None = None
+                    score = PENALTY_SCORE
                     try:
-                        score = evaluate(miner.image_ref, challenges)
+                        score, metrics_payload = evaluate(miner.image_ref, challenges)
                     except Exception as exc:
                         logger.exception(
                             f"evaluation failed: hotkey={miner.hotkey} "
                             f"image_ref={miner.image_ref} error={exc}"
                         )
-                        score = PENALTY_SCORE
+                        metrics_payload = {
+                            "image_ref": miner.image_ref,
+                            "quality_score": 0.0,
+                            "final_score": float(PENALTY_SCORE),
+                            "challenge_metrics": [],
+                            "error": str(exc),
+                            "updated_at": time.time(),
+                        }
 
-                    updated = self._state.set_coming_score(
+                    updated = self._state.set_evaluation_result(
                         hotkey=miner.hotkey,
                         image_ref=miner.image_ref,
-                        coming_score=score,
+                        metrics=metrics_payload,
                     )
                     if updated:
                         logger.info(
                             f"evaluation end: hotkey={miner.hotkey} "
-                            f"image_ref={miner.image_ref} coming_score={score}"
+                            f"image_ref={miner.image_ref} staged_final_score={score}"
                         )
                     else:
                         logger.info(

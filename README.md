@@ -11,7 +11,7 @@ This service maintains an in-memory table of miner submissions, evaluates miners
 ## Endpoints
 
 - `POST /update` to upsert miner submissions
-- `GET /scores` to fetch the full score table
+- `GET /metrics` to fetch latest committed scoring metrics per miner (includes per-challenge entries)
 
 ## Environment Setup
 
@@ -100,6 +100,7 @@ Per-video score output now includes:
 
 - State is held in memory and persisted to a local SQLite database (WAL mode)
 - Single process / single evaluation loop
+- Metrics retention is bounded to the latest evaluation per miner, so storing all per-challenge metrics for `SCORING_COUNT=5` is practical even with many miners.
 
 ## GPU / Docker Troubleshooting
 

@@ -5,10 +5,11 @@ import sqlite3
 import threading
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
-from executor.models import MinerRecord, MinerScoreResponse, MinerSubmission
+from executor.models import MinerMetricsResponse, MinerRecord, MinerSubmission
 
 
 def _resolve_db_and_legacy_paths(state_file: Path) -> tuple[Path, Path | None]:
@@ -21,6 +22,7 @@ class MinerState:
     def __init__(self, state_file: str | None = None) -> None:
         self._lock = threading.Lock()
         self._miners: dict[str, MinerRecord] = {}
+        self._metrics_version: int = 0
         if state_file:
             raw = Path(state_file)
             self._db_path, self._legacy_json_path = _resolve_db_and_legacy_paths(raw)
@@ -38,11 +40,34 @@ class MinerState:
                 hotkey TEXT PRIMARY KEY NOT NULL,
                 image_ref TEXT NOT NULL,
                 submit_time REAL NOT NULL,
-                score REAL NOT NULL DEFAULT -1,
-                coming_score REAL NOT NULL DEFAULT -1
+                metrics_json TEXT,
+                coming_metrics_json TEXT
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS state_meta (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO state_meta (key, value) VALUES ('metrics_version', '0')"
+        )
+
+    @staticmethod
+    def _read_metrics_version(conn: sqlite3.Connection) -> int:
+        try:
+            row = conn.execute(
+                "SELECT value FROM state_meta WHERE key='metrics_version'"
+            ).fetchone()
+            if row and row[0] is not None:
+                return int(str(row[0]))
+        except Exception:
+            return 0
+        return 0
 
     @staticmethod
     def _miners_from_json_payload(payload: object) -> dict[str, MinerRecord]:
@@ -59,22 +84,18 @@ class MinerState:
             hotkey = item.get("hotkey")
             image_ref = item.get("image_ref")
             submit_time = item.get("submit_time")
-            score = item.get("score", -1.0)
-            coming_score = item.get("coming_score", -1.0)
+            metrics = item.get("metrics")
+            coming_metrics = item.get("coming_metrics")
             if not isinstance(hotkey, str) or not isinstance(image_ref, str):
                 continue
             if not isinstance(submit_time, (int, float)):
                 continue
-            if not isinstance(score, (int, float)):
-                score = -1.0
-            if not isinstance(coming_score, (int, float)):
-                coming_score = -1.0
             loaded[hotkey] = MinerRecord(
                 hotkey=hotkey,
                 image_ref=image_ref,
                 submit_time=float(submit_time),
-                score=float(score),
-                coming_score=float(coming_score),
+                metrics=metrics if isinstance(metrics, dict) else None,
+                coming_metrics=coming_metrics if isinstance(coming_metrics, dict) else None,
             )
         return loaded
 
@@ -96,18 +117,35 @@ class MinerState:
         conn = sqlite3.connect(str(self._db_path))
         try:
             self._ensure_schema(conn)
+            self._metrics_version = self._read_metrics_version(conn)
             if db_existed:
                 cur = conn.execute(
-                    "SELECT hotkey, image_ref, submit_time, score, coming_score "
+                    "SELECT hotkey, image_ref, submit_time, metrics_json, coming_metrics_json "
                     "FROM miners ORDER BY submit_time"
                 )
-                for hotkey, image_ref, submit_time, score, coming_score in cur.fetchall():
+                for hotkey, image_ref, submit_time, metrics_json, coming_metrics_json in cur.fetchall():
+                    metrics: dict[str, Any] | None = None
+                    coming_metrics: dict[str, Any] | None = None
+                    if isinstance(metrics_json, str) and metrics_json.strip():
+                        try:
+                            parsed = json.loads(metrics_json)
+                            if isinstance(parsed, dict):
+                                metrics = parsed
+                        except Exception:
+                            metrics = None
+                    if isinstance(coming_metrics_json, str) and coming_metrics_json.strip():
+                        try:
+                            parsed = json.loads(coming_metrics_json)
+                            if isinstance(parsed, dict):
+                                coming_metrics = parsed
+                        except Exception:
+                            coming_metrics = None
                     self._miners[hotkey] = MinerRecord(
                         hotkey=hotkey,
                         image_ref=image_ref,
                         submit_time=float(submit_time),
-                        score=float(score),
-                        coming_score=float(coming_score),
+                        metrics=metrics,
+                        coming_metrics=coming_metrics,
                     )
                 logger.info(f"loaded {len(self._miners)} miners from sqlite")
         finally:
@@ -123,13 +161,19 @@ class MinerState:
                     f"migrated {len(loaded)} miners from {self._legacy_json_path} to sqlite"
                 )
 
-    def _save_locked(self) -> None:
+    def _save_locked(self, *, bump_metrics_version: bool = False) -> None:
         if self._db_path is None:
             return
 
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         rows = [
-            (r.hotkey, r.image_ref, r.submit_time, r.score, r.coming_score)
+            (
+                r.hotkey,
+                r.image_ref,
+                r.submit_time,
+                json.dumps(r.metrics) if isinstance(r.metrics, dict) else None,
+                json.dumps(r.coming_metrics) if isinstance(r.coming_metrics, dict) else None,
+            )
             for r in sorted(self._miners.values(), key=lambda r: r.submit_time)
         ]
         conn = sqlite3.connect(str(self._db_path))
@@ -138,16 +182,23 @@ class MinerState:
             self._ensure_schema(conn)
             conn.execute("DELETE FROM miners")
             conn.executemany(
-                "INSERT INTO miners (hotkey, image_ref, submit_time, score, coming_score) "
+                "INSERT INTO miners (hotkey, image_ref, submit_time, metrics_json, coming_metrics_json) "
                 "VALUES (?,?,?,?,?)",
                 rows,
             )
+            if bump_metrics_version:
+                self._metrics_version += 1
+                conn.execute(
+                    "UPDATE state_meta SET value = ? WHERE key='metrics_version'",
+                    (str(self._metrics_version),),
+                )
             conn.commit()
         finally:
             conn.close()
 
     def upsert_submissions(self, submissions: list[MinerSubmission]) -> None:
         changed = False
+        affects_committed_metrics = False
         with self._lock:
             for submission in submissions:
                 existing = self._miners.get(submission.hotkey)
@@ -162,12 +213,14 @@ class MinerState:
                     continue
 
                 if existing.image_ref != submission.image_ref:
+                    if existing.metrics is not None:
+                        affects_committed_metrics = True
                     self._miners[submission.hotkey] = MinerRecord(
                         hotkey=submission.hotkey,
                         image_ref=submission.image_ref,
                         submit_time=submission.submit_time,
-                        score=-1.0,
-                        coming_score=-1.0,
+                        metrics=None,
+                        coming_metrics=None,
                     )
                     changed = True
                     logger.info(
@@ -177,12 +230,14 @@ class MinerState:
                     continue
 
                 if existing.submit_time != submission.submit_time:
+                    if existing.metrics is not None:
+                        affects_committed_metrics = True
                     self._miners[submission.hotkey] = MinerRecord(
                         hotkey=existing.hotkey,
                         image_ref=existing.image_ref,
                         submit_time=submission.submit_time,
-                        score=existing.score,
-                        coming_score=existing.coming_score,
+                        metrics=existing.metrics,
+                        coming_metrics=existing.coming_metrics,
                     )
                     changed = True
                     logger.info(
@@ -190,22 +245,37 @@ class MinerState:
                         f"submit_time={submission.submit_time}"
                     )
             if changed:
-                self._save_locked()
+                self._save_locked(bump_metrics_version=affects_committed_metrics)
 
-    def list_scores(self) -> list[MinerScoreResponse]:
+    def list_metrics(self) -> list[MinerMetricsResponse]:
         with self._lock:
             records = sorted(self._miners.values(), key=lambda r: r.submit_time)
             return [
-                MinerScoreResponse(
+                MinerMetricsResponse(
                     hotkey=record.hotkey,
                     image_ref=record.image_ref,
                     submit_time=record.submit_time,
-                    score=record.score,
-                    coming_score=record.coming_score,
+                    metrics=record.metrics,
                 )
                 for record in records
-                if record.score != -1.0
+                if record.metrics is not None
             ]
+
+    def list_metrics_with_etag(self) -> tuple[list[MinerMetricsResponse], str]:
+        with self._lock:
+            records = sorted(self._miners.values(), key=lambda r: r.submit_time)
+            metrics = [
+                MinerMetricsResponse(
+                    hotkey=record.hotkey,
+                    image_ref=record.image_ref,
+                    submit_time=record.submit_time,
+                    metrics=record.metrics,
+                )
+                for record in records
+                if record.metrics is not None
+            ]
+            etag = f'W/"metrics-{self._metrics_version}"'
+            return metrics, etag
 
     def has_miners(self) -> bool:
         with self._lock:
@@ -213,20 +283,28 @@ class MinerState:
 
     def get_pending_miners(self) -> list[MinerRecord]:
         with self._lock:
-            pending = [m for m in self._miners.values() if m.coming_score == -1.0]
+            pending = [m for m in self._miners.values() if m.coming_metrics is None]
             pending.sort(key=lambda r: r.submit_time)
             # Return copies to keep internal state isolated.
             return [replace(record) for record in pending]
 
-    def set_coming_score(self, hotkey: str, image_ref: str, coming_score: float) -> bool:
+    def set_evaluation_result(
+        self,
+        *,
+        hotkey: str,
+        image_ref: str,
+        metrics: dict[str, Any] | None,
+    ) -> bool:
+        """
+        Atomically stage next-round metrics snapshot for one miner.
+        """
         with self._lock:
             record = self._miners.get(hotkey)
             if record is None:
                 return False
             if record.image_ref != image_ref:
-                # Submission changed while evaluation was running.
                 return False
-            record.coming_score = coming_score
+            record.coming_metrics = metrics
             self._save_locked()
             return True
 
@@ -234,10 +312,10 @@ class MinerState:
         with self._lock:
             if not self._miners:
                 return False
-            if any(record.coming_score == -1.0 for record in self._miners.values()):
+            if any(record.coming_metrics is None for record in self._miners.values()):
                 return False
             for record in self._miners.values():
-                record.score = record.coming_score
-                record.coming_score = -1.0
-            self._save_locked()
+                record.metrics = record.coming_metrics
+                record.coming_metrics = None
+            self._save_locked(bump_metrics_version=True)
             return True
