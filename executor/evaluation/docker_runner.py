@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -12,6 +13,7 @@ from pathlib import Path
 from loguru import logger
 
 from executor.models import Challenge, ChallengeResult
+from executor.r2 import upload_video_base64_to_r2
 from executor.scoring.efficiency import EfficiencyConfig, aggregate_efficiency_scores
 from executor.scoring import score_video
 
@@ -58,6 +60,21 @@ def _safe_float_or_none(value: object) -> float | None:
     if out < 0:
         return None
     return out
+
+
+def _upload_video_to_r2(video_path: Path, challenge: Challenge) -> str | None:
+    try:
+        video_b64 = base64.b64encode(video_path.read_bytes()).decode("ascii")
+        return upload_video_base64_to_r2(
+            video_b64,
+            prompt=challenge.text or challenge.challenge_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"r2 upload failed challenge={challenge.challenge_id} "
+            f"video_path={video_path} err={exc}"
+        )
+        return None
 
 
 def _container_host_pids(container_id: str) -> set[int]:
@@ -483,6 +500,7 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
             if result.success:
                 output_video = job_dir / "output" / f"{challenge.challenge_id}.mp4"
                 if output_video.exists():
+                    video_url = _upload_video_to_r2(output_video, challenge)
                     face_tmp = job_dir / "input" / f"face_{challenge.challenge_id}.png"
                     audio_ext = _infer_audio_extension(challenge.audio_bytes)
                     audio_tmp = job_dir / "input" / f"audio_{challenge.challenge_id}{audio_ext}"
@@ -508,6 +526,7 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                                 "peak_vram_gb": result.peak_vram_gb,
                                 "inference_time_sec": result.inference_time_sec,
                                 "efficiency_source": result.efficiency_source,
+                                "video_url": video_url,
                                 "identity": float(score_obj.get("identity", 0.0)),
                                 "lipsync": float(score_obj.get("lipsync", 0.0)),
                                 "audio": float(score_obj.get("audio", 0.0)),
@@ -538,6 +557,7 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                                 "peak_vram_gb": result.peak_vram_gb,
                                 "inference_time_sec": result.inference_time_sec,
                                 "efficiency_source": result.efficiency_source,
+                                "video_url": video_url,
                                 "error": f"quality_scoring_failed: {exc}",
                             }
                         )
@@ -555,6 +575,7 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                             "peak_vram_gb": result.peak_vram_gb,
                             "inference_time_sec": result.inference_time_sec,
                             "efficiency_source": result.efficiency_source,
+                            "video_url": None,
                             "error": "output_video_missing",
                         }
                     )
@@ -567,6 +588,7 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                         "peak_vram_gb": result.peak_vram_gb,
                         "inference_time_sec": result.inference_time_sec,
                         "efficiency_source": result.efficiency_source,
+                        "video_url": None,
                         "error": result.error or "challenge_failed",
                     }
                 )

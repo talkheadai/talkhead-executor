@@ -25,6 +25,7 @@ dependencies = [
   "insightface>=0.7.3",
   "onnxruntime>=1.18",
   "openai-whisper>=20231117",
+  "boto3>=1.37.20",
 ]
 
 [project.optional-dependencies]
