@@ -616,7 +616,7 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                 "inference_time_sec": None,
                 "time_norm": 0.0,
                 "vram_norm": 0.0,
-                "efficiency_factor": 1.0,
+                "efficiency_factor": 0.0,
             },
         }
     mean_quality = _avg(scoring_quality)

@@ -1,6 +1,6 @@
-# Minimal Stateful Executor Service
+# Talkhead Executor Service
 
-This service maintains an in-memory table of miner submissions, evaluates miners continuously, and exposes HTTP APIs to update submissions and fetch scores.
+This service maintains a table of miner submissions, evaluates miners continuously, and exposes HTTP APIs to update submissions and fetch scores.
 
 ## Layout
 
@@ -48,12 +48,6 @@ ffmpeg -version
 Start the API service:
 
 ```bash
-executor-service
-```
-
-Alternatives:
-
-```bash
 python app.py
 ```
 
@@ -65,7 +59,20 @@ uvicorn executor.app:app --host 0.0.0.0 --port 8000
 
 - `SUBNET_API_URL` (default in loop: `https://subnet.talkhead.ai`; challenges are fetched from `{SUBNET_API_URL}/challenge`)
 - `PORT` (default: `8000`)
-- `STATE_FILE` (default: `./state.db`) — SQLite database path. If you previously used `./state.json`, set `STATE_FILE` to that path once: on first run the service creates `state.db` next to it and imports rows from the JSON file.
+- `STATE_FILE` (default: `./state.db`) — SQLite database path.
+
+## Quality Scoring
+
+- Per-video quality is computed before efficiency is applied.
+- Hard fail on transcript mismatch: if `wer > 0.60`, then `quality_score = 0.0`.
+- Otherwise:
+  - `blended = 0.35*identity + 0.35*lipsync + 0.15*video + 0.10*audio + 0.05*temporal - penalty`
+  - `quality_score = clamp01(gate * blended)`
+- Gate multipliers (applied multiplicatively):
+  - If `identity_mode == "insightface"` and `face_detect_ratio < 0.80`, multiply gate by `0.2`.
+  - If `identity < 0.35`, multiply gate by `0.1`.
+  - If `sync_c < 0.45`, multiply gate by `0.2`.
+- All component scores and `quality_score` are clamped to `[0, 1]`.
 
 ## Efficiency Scoring
 
@@ -91,7 +98,7 @@ Per-video score output now includes:
     "inference_time_sec": 0.0,
     "time_norm": 0.0,
     "vram_norm": 0.0,
-    "efficiency_factor": 1.0
+    "efficiency_factor": 0.0
   }
 }
 ```

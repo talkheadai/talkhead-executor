@@ -43,7 +43,6 @@ def score_video(
     *,
     peak_vram_gb: float | None = None,
     inference_time_sec: float | None = None,
-    efficiency_source: str | None = None,
     efficiency_config: EfficiencyConfig | None = None,
 ) -> dict:
     """

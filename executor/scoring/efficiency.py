@@ -140,7 +140,7 @@ def aggregate_efficiency_scores(
             "inference_time_sec_worst": None,
             "time_norm": 0.0,
             "vram_norm": 0.0,
-            "efficiency_factor": 1.0,
+            "efficiency_factor": 0.0,
             "cap_violation": False,
             "quality_score": mean_quality,
             "final_score": mean_quality,
