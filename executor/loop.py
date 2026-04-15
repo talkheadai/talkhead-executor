@@ -143,9 +143,7 @@ def _decode_base64(raw: object) -> bytes | None:
         s = s + ("=" * (4 - (len(s) % 4)))
     for altchars in (None, b"-_"):
         try:
-            decoded = base64.b64decode(s, altchars=altchars, validate=True)
-            if decoded:
-                return decoded
+            return base64.b64decode(s, altchars=altchars, validate=True)
         except (binascii.Error, ValueError):
             continue
     return None

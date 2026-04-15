@@ -19,8 +19,8 @@ from executor.scoring import score_video
 
 READY_TIMEOUT_SEC = 600
 CHALLENGE_TIMEOUT_SEC = 120
-WARMUP_COUNT = 0
-SCORING_COUNT = 1
+WARMUP_COUNT = 2
+SCORING_COUNT = 5
 PULL_IMAGE_MAX_RETRIES = 5
 PULL_IMAGE_RETRY_SLEEP_SEC = 2.0
 EVALUATION_CONTAINER_LABEL = "talkhead.executor.evaluation=true"
@@ -41,9 +41,17 @@ def _avg(values: list[float]) -> float:
 
 
 def _infer_audio_extension(audio_bytes: bytes) -> str:
-    if audio_bytes.startswith(b"RIFF") and len(audio_bytes) >= 12 and audio_bytes[8:12] == b"WAVE":
+    if (
+        audio_bytes.startswith(b"RIFF")
+        and len(audio_bytes) >= 12
+        and audio_bytes[8:12] == b"WAVE"
+    ):
         return ".wav"
-    if audio_bytes.startswith(b"ID3") or (len(audio_bytes) >= 2 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xE0) == 0xE0):
+    if audio_bytes.startswith(b"ID3") or (
+        len(audio_bytes) >= 2
+        and audio_bytes[0] == 0xFF
+        and (audio_bytes[1] & 0xE0) == 0xE0
+    ):
         return ".mp3"
     if audio_bytes.startswith(b"OggS"):
         return ".ogg"
@@ -156,7 +164,9 @@ class _ContainerVramPeakMonitor:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._thread = threading.Thread(target=self._run, daemon=True, name="vram-peak-monitor")
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="vram-peak-monitor"
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -176,37 +186,16 @@ class _ContainerVramPeakMonitor:
 
 
 def _extract_efficiency_metrics(
-    result_data: dict,
     *,
     elapsed_host_time_sec: float,
     executor_peak_vram_gb: float | None,
-) -> tuple[float | None, float | None, str]:
+) -> tuple[float | None, float | None]:
     """
-    Preferred source is miner-reported metrics inside `result.json`.
-    Fallback: host wall-clock challenge time (proxy; may include lightweight file IPC).
+    Extract efficiency metrics from the executor.
     """
-    efficiency_block = result_data.get("efficiency")
-    if not isinstance(efficiency_block, dict):
-        efficiency_block = {}
-
     if executor_peak_vram_gb is not None:
-        peak_vram_gb = max(0.0, executor_peak_vram_gb)
-
-    inference_time_sec = _safe_float_or_none(efficiency_block.get("inference_time_sec"))
-    if inference_time_sec is None:
-        inference_time_sec = _safe_float_or_none(result_data.get("inference_time_sec"))
-
-    measurement_source = str(efficiency_block.get("measurement_source") or "").strip()
-    if peak_vram_gb is not None or inference_time_sec is not None:
-        if not measurement_source:
-            measurement_source = "miner_json"
-        return peak_vram_gb, inference_time_sec, measurement_source
-
-    if executor_peak_vram_gb is not None:
-        peak_vram_gb = max(0.0, executor_peak_vram_gb)
-        return peak_vram_gb, max(0.0, elapsed_host_time_sec), "executor_nvidia_smi_fallback"
-
-    return None, max(0.0, elapsed_host_time_sec), "executor_host_wall_clock_fallback"
+        return max(0.0, executor_peak_vram_gb), max(0.0, elapsed_host_time_sec)
+    return None, max(0.0, elapsed_host_time_sec)
 
 
 def _load_challenges(challenges_dir: str) -> list[Challenge]:
@@ -236,7 +225,9 @@ def pull_image(image_ref: str) -> bool:
         try:
             subprocess.run(["docker", "pull", image_ref], check=True)
             if attempt > 1:
-                logger.info(f"docker pull succeeded on retry {attempt}/{PULL_IMAGE_MAX_RETRIES}: {image_ref}")
+                logger.info(
+                    f"docker pull succeeded on retry {attempt}/{PULL_IMAGE_MAX_RETRIES}: {image_ref}"
+                )
             return True
         except Exception as exc:
             logger.warning(
@@ -245,8 +236,11 @@ def pull_image(image_ref: str) -> bool:
             )
             if attempt < PULL_IMAGE_MAX_RETRIES:
                 time.sleep(PULL_IMAGE_RETRY_SLEEP_SEC)
-    logger.error(f"docker pull failed after {PULL_IMAGE_MAX_RETRIES} attempts: {image_ref}")
+    logger.error(
+        f"docker pull failed after {PULL_IMAGE_MAX_RETRIES} attempts: {image_ref}"
+    )
     return False
+
 
 def start_container(image_ref: str, job_dir: str) -> str:
     job_path = Path(job_dir)
@@ -327,7 +321,9 @@ def stop_all_running_containers() -> None:
             text=True,
         )
         if res.stdout.strip():
-            container_ids.extend([line.strip() for line in res.stdout.splitlines() if line.strip()])
+            container_ids.extend(
+                [line.strip() for line in res.stdout.splitlines() if line.strip()]
+            )
     except Exception as exc:
         logger.warning(f"failed to list running evaluation containers: {exc}")
 
@@ -396,16 +392,19 @@ def _send_challenge(
             if result_json_path.exists():
                 elapsed = time.perf_counter() - start
                 try:
-                    result_data = json.loads(result_json_path.read_text(encoding="utf-8"))
+                    result_data = json.loads(
+                        result_json_path.read_text(encoding="utf-8")
+                    )
                 except Exception:
                     result_data = {}
                 success = bool(result_data.get("success", False))
                 error = result_data.get("error")
-                peak_vram_gb, inference_time_sec, efficiency_source = _extract_efficiency_metrics(
-                    result_data=result_data,
+                peak_vram_gb, inference_time_sec = _extract_efficiency_metrics(
                     elapsed_host_time_sec=elapsed,
                     executor_peak_vram_gb=(
-                        (vram_monitor.peak_mib / 1024.0) if vram_monitor and vram_monitor.peak_mib > 0 else None
+                        (vram_monitor.peak_mib / 1024.0)
+                        if vram_monitor and vram_monitor.peak_mib > 0
+                        else None
                     ),
                 )
                 _safe_remove(task_path)
@@ -418,7 +417,6 @@ def _send_challenge(
                     error=error,
                     peak_vram_gb=peak_vram_gb,
                     inference_time_sec=inference_time_sec,
-                    efficiency_source=efficiency_source,
                 )
             time.sleep(0.1)
     finally:
@@ -434,13 +432,12 @@ def _send_challenge(
         success=False,
         host_time_sec=elapsed,
         error=f"timeout_{CHALLENGE_TIMEOUT_SEC}s",
-        peak_vram_gb=(vram_monitor.peak_mib / 1024.0) if vram_monitor and vram_monitor.peak_mib > 0 else None,
-        inference_time_sec=max(0.0, elapsed),
-        efficiency_source=(
-            "executor_nvidia_smi_fallback"
+        peak_vram_gb=(
+            (vram_monitor.peak_mib / 1024.0)
             if vram_monitor and vram_monitor.peak_mib > 0
-            else "executor_host_wall_clock_fallback"
+            else None
         ),
+        inference_time_sec=max(0.0, elapsed),
     )
 
 
@@ -503,7 +500,9 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                     video_url = _upload_video_to_r2(output_video, challenge)
                     face_tmp = job_dir / "input" / f"face_{challenge.challenge_id}.png"
                     audio_ext = _infer_audio_extension(challenge.audio_bytes)
-                    audio_tmp = job_dir / "input" / f"audio_{challenge.challenge_id}{audio_ext}"
+                    audio_tmp = (
+                        job_dir / "input" / f"audio_{challenge.challenge_id}{audio_ext}"
+                    )
                     face_tmp.write_bytes(challenge.face_bytes)
                     audio_tmp.write_bytes(challenge.audio_bytes)
                     try:
@@ -514,18 +513,22 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                             expected_transcript=challenge.text or None,
                             peak_vram_gb=result.peak_vram_gb,
                             inference_time_sec=result.inference_time_sec,
-                            efficiency_source=result.efficiency_source,
                             efficiency_config=eff_cfg,
                         )
-                        scoring_quality.append(float(score_obj.get("quality_score", score_obj.get("final", 0.0))))
+                        scoring_quality.append(
+                            float(
+                                score_obj.get(
+                                    "quality_score", score_obj.get("final", 0.0)
+                                )
+                            )
+                        )
                         challenge_metrics.append(
                             {
                                 "challenge_id": challenge.challenge_id,
                                 "success": True,
-                                "host_time_sec": result.host_time_sec,
-                                "peak_vram_gb": result.peak_vram_gb,
-                                "inference_time_sec": result.inference_time_sec,
-                                "efficiency_source": result.efficiency_source,
+                                # "host_time_sec": result.host_time_sec,
+                                # "peak_vram_gb": result.peak_vram_gb,
+                                # "inference_time_sec": result.inference_time_sec,
                                 "video_url": video_url,
                                 "identity": float(score_obj.get("identity", 0.0)),
                                 "lipsync": float(score_obj.get("lipsync", 0.0)),
@@ -538,7 +541,9 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                                     if isinstance(score_obj.get("debug"), dict)
                                     else 1.0
                                 ),
-                                "quality_score": float(score_obj.get("quality_score", 0.0)),
+                                "quality_score": float(
+                                    score_obj.get("quality_score", 0.0)
+                                ),
                                 "final_score": float(score_obj.get("final", 0.0)),
                                 "efficiency": score_obj.get("efficiency"),
                             }
@@ -556,7 +561,6 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                                 "host_time_sec": result.host_time_sec,
                                 "peak_vram_gb": result.peak_vram_gb,
                                 "inference_time_sec": result.inference_time_sec,
-                                "efficiency_source": result.efficiency_source,
                                 "video_url": video_url,
                                 "error": f"quality_scoring_failed: {exc}",
                             }
@@ -574,7 +578,6 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                             "host_time_sec": result.host_time_sec,
                             "peak_vram_gb": result.peak_vram_gb,
                             "inference_time_sec": result.inference_time_sec,
-                            "efficiency_source": result.efficiency_source,
                             "video_url": None,
                             "error": "output_video_missing",
                         }
@@ -587,7 +590,6 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                         "host_time_sec": result.host_time_sec,
                         "peak_vram_gb": result.peak_vram_gb,
                         "inference_time_sec": result.inference_time_sec,
-                        "efficiency_source": result.efficiency_source,
                         "video_url": None,
                         "error": result.error or "challenge_failed",
                     }
@@ -596,7 +598,7 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
         if container_id:
             stop_container(container_id)
         shutil.rmtree(job_dir, ignore_errors=True)
-        # remove_all_images()
+        remove_all_images()
 
     failures = [r for r in warmup_results + scoring_results if not r.success]
     if failures:
@@ -614,7 +616,7 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                 "inference_time_sec": None,
                 "time_norm": 0.0,
                 "vram_norm": 0.0,
-                "efficiency_factor": 1.0,
+                "efficiency_factor": 0.0,
             },
         }
     mean_quality = _avg(scoring_quality)
@@ -646,7 +648,6 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
             "vram_norm": eff.get("vram_norm"),
             "efficiency_factor": eff.get("efficiency_factor"),
             "cap_violation": eff.get("cap_violation"),
-            "measurement_source": eff.get("measurement_source"),
         },
         "updated_at": time.time(),
     }

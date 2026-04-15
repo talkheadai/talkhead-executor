@@ -43,7 +43,6 @@ def score_video(
     *,
     peak_vram_gb: float | None = None,
     inference_time_sec: float | None = None,
-    efficiency_source: str | None = None,
     efficiency_config: EfficiencyConfig | None = None,
 ) -> dict:
     """
@@ -66,7 +65,9 @@ def score_video(
     if not Path(video_path).exists():
         raise FileNotFoundError(f"video_path does not exist: {video_path}")
     if not Path(reference_image_path).exists():
-        raise FileNotFoundError(f"reference_image_path does not exist: {reference_image_path}")
+        raise FileNotFoundError(
+            f"reference_image_path does not exist: {reference_image_path}"
+        )
     if not Path(audio_path).exists():
         raise FileNotFoundError(f"audio_path does not exist: {audio_path}")
 
@@ -100,7 +101,14 @@ def score_video(
             video_audio_signal=video_audio_signal,
             video_audio_sr=video_audio_sr,
         ),
-        {"lipsync": 0.0, "sync_c": 0.0, "sync_d": 1.0, "audio_envelope": [], "mouth_signal": [], "sync_curve": []},
+        {
+            "lipsync": 0.0,
+            "sync_c": 0.0,
+            "sync_d": 1.0,
+            "audio_envelope": [],
+            "mouth_signal": [],
+            "sync_curve": [],
+        },
     )
 
     audio = safe_run(
@@ -114,7 +122,14 @@ def score_video(
             video_audio_path_for_asr=video_audio_tmp,
             source_audio_path_for_asr=audio_path,
         ),
-        {"audio": 0.0, "wer": 1.0, "tsim": 0.0, "audio_quality": 0.0, "video_audio_energy": 0.0, "source_audio_energy": 0.0},
+        {
+            "audio": 0.0,
+            "wer": 1.0,
+            "tsim": 0.0,
+            "audio_quality": 0.0,
+            "video_audio_energy": 0.0,
+            "source_audio_energy": 0.0,
+        },
     )
 
     video = safe_run(
@@ -130,7 +145,11 @@ def score_video(
             face_bboxes=identity.get("face_bboxes", []),
             mouth_motion_signal=lipsync.get("mouth_signal", []),
         ),
-        {"temporal": 0.0, "identity_temporal_consistency": 0.0, "motion_smoothness": 0.0},
+        {
+            "temporal": 0.0,
+            "identity_temporal_consistency": 0.0,
+            "motion_smoothness": 0.0,
+        },
     )
 
     penalties = safe_run(
@@ -182,8 +201,6 @@ def score_video(
         mean_quality=quality_score,
         cfg=cfg,
     )
-    if efficiency_source and efficiency.get("measurement_source") == "miner_json":
-        efficiency["measurement_source"] = efficiency_source
 
     out = {
         "identity": clamp01(identity_score),
@@ -199,8 +216,9 @@ def score_video(
             "inference_time_sec": efficiency.get("inference_time_sec"),
             "time_norm": max(0.0, min(3.0, float(efficiency.get("time_norm", 0.0)))),
             "vram_norm": max(0.0, min(3.0, float(efficiency.get("vram_norm", 0.0)))),
-            "efficiency_factor": clamp01(float(efficiency.get("efficiency_factor", 1.0))),
-            "measurement_source": efficiency.get("measurement_source"),
+            "efficiency_factor": clamp01(
+                float(efficiency.get("efficiency_factor", 0.0))
+            ),
             "cap_violation": bool(efficiency.get("cap_violation", False)),
         },
         "debug": {
