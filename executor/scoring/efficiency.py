@@ -11,6 +11,7 @@ for an isolated GPU workload in another container. If the miner omits these
 fields, metrics are treated as unavailable: norms are 0 and `efficiency_factor`
 is 1.0 so quality-only scoring remains backward compatible.
 """
+
 from __future__ import annotations
 
 MAX_VRAM_GB = 10
@@ -22,6 +23,7 @@ TIE_QUALITY_EPSILON = 1e-5
 
 import math
 from dataclasses import dataclass
+
 
 @dataclass(frozen=True)
 class EfficiencyConfig:
@@ -118,10 +120,17 @@ def aggregate_efficiency_scores(
     and worst-case (max) for caps and debug.
 
     Missing per-challenge values are omitted from means; if all missing,
-    efficiency_factor is 1.0 and measurement_source is unavailable.
     """
-    vrams = [v for v in per_challenge_peak_vram_gb if v is not None and math.isfinite(v) and v >= 0]
-    times = [t for t in per_challenge_inference_sec if t is not None and math.isfinite(t) and t >= 0]
+    vrams = [
+        v
+        for v in per_challenge_peak_vram_gb
+        if v is not None and math.isfinite(v) and v >= 0
+    ]
+    times = [
+        t
+        for t in per_challenge_inference_sec
+        if t is not None and math.isfinite(t) and t >= 0
+    ]
 
     if not vrams and not times:
         return {
@@ -132,7 +141,6 @@ def aggregate_efficiency_scores(
             "time_norm": 0.0,
             "vram_norm": 0.0,
             "efficiency_factor": 1.0,
-            "measurement_source": "unavailable",
             "cap_violation": False,
             "quality_score": mean_quality,
             "final_score": mean_quality,
@@ -143,13 +151,23 @@ def aggregate_efficiency_scores(
     worst_vram = max(vrams) if vrams else None
     worst_time = max(times) if times else None
 
-    time_norm = norm_higher_worse_linear(mean_time or 0.0, cfg.time_ref_sec) if mean_time is not None else 0.0
-    vram_norm = norm_higher_worse_linear(mean_vram or 0.0, cfg.vram_ref_gb) if mean_vram is not None else 0.0
+    time_norm = (
+        norm_higher_worse_linear(mean_time or 0.0, cfg.time_ref_sec)
+        if mean_time is not None
+        else 0.0
+    )
+    vram_norm = (
+        norm_higher_worse_linear(mean_vram or 0.0, cfg.vram_ref_gb)
+        if mean_vram is not None
+        else 0.0
+    )
 
     eff_factor = efficiency_factor_from_norms(time_norm, vram_norm)
 
     violates_vram = bool(
-        cfg.max_vram_gb is not None and worst_vram is not None and worst_vram > cfg.max_vram_gb
+        cfg.max_vram_gb is not None
+        and worst_vram is not None
+        and worst_vram > cfg.max_vram_gb
     )
     violates_time = bool(
         cfg.max_inference_time_sec is not None
@@ -169,7 +187,6 @@ def aggregate_efficiency_scores(
             "time_norm": time_norm,
             "vram_norm": vram_norm,
             "efficiency_factor": 0.0,
-            "measurement_source": "miner_json",
             "cap_violation": True,
             "reject_reason": reject_reason,
             "quality_score": mean_quality,
@@ -192,7 +209,6 @@ def aggregate_efficiency_scores(
         "time_norm": time_norm,
         "vram_norm": vram_norm,
         "efficiency_factor": combined_eff,
-        "measurement_source": "miner_json",
         "cap_violation": violates_vram or violates_time,
         "quality_score": mean_quality,
         "final_score": final_score,
@@ -200,7 +216,9 @@ def aggregate_efficiency_scores(
     return out
 
 
-def tie_break_tuple(mean_inference_sec: float | None, mean_peak_vram_gb: float | None) -> tuple[float, float]:
+def tie_break_tuple(
+    mean_inference_sec: float | None, mean_peak_vram_gb: float | None
+) -> tuple[float, float]:
     """
     Sort key fragment: lower inference time wins, then lower VRAM.
     Use with: (-score, tie_break_tuple(...), submit_time) for stable ordering.
@@ -233,4 +251,6 @@ def should_prefer_candidate_a(
         return True
     if score_b > score_a + cfg.tie_quality_epsilon:
         return False
-    return tie_break_tuple(infer_sec_a, peak_vram_a) < tie_break_tuple(infer_sec_b, peak_vram_b)
+    return tie_break_tuple(infer_sec_a, peak_vram_a) < tie_break_tuple(
+        infer_sec_b, peak_vram_b
+    )
