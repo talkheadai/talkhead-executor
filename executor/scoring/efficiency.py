@@ -9,7 +9,7 @@ miner `result.json` under `efficiency.peak_vram_gb` and
 **Limitation:** The executor process cannot call `torch.cuda.max_memory_allocated()`
 for an isolated GPU workload in another container. If the miner omits these
 fields, metrics are treated as unavailable: norms are 0 and `efficiency_factor`
-is 1.0 so quality-only scoring remains backward compatible.
+is 0.0 so quality-only scoring remains backward compatible.
 """
 
 from __future__ import annotations
