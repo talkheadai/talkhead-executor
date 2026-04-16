@@ -1,12 +1,9 @@
 # Talkhead Executor Service
 
-This service maintains a table of miner submissions, evaluates miners continuously, and exposes HTTP APIs to update submissions and fetch scores.
+This service maintains a table of miner submissions, evaluates miners continuously, and exposes APIs to update submissions and fetch scores.
 
-## Layout
-
-- `executor/` — installable package (`app`, `loop`, `state`, `models`, `verify`)
-- `executor/evaluation/` — Docker miner run and challenge orchestration (`docker_runner`)
-- `executor/scoring/` — multi-metric quality scoring (identity, lipsync, audio, video, temporal, penalties)
+> [REFERENCE]
+> This repository is part of the Talkhead subnet. The full subnet description is available in [talkheadai/talkhead-subnet](https://github.com/talkheadai/talkhead-subnet).
 
 ## Endpoints
 
@@ -77,6 +74,8 @@ uvicorn executor.app:app --host 0.0.0.0 --port 8000
 ## Efficiency Scoring
 
 - Final scoring is quality-first with a soft efficiency modifier: `final_score = quality_score * efficiency_factor`.
+> [IMPORTANT]
+> Winner selection is by maximum `final_score`: among all miner submissions, the highest `final_score` is preferred.
 - `efficiency_factor = exp(-0.15 * time_norm - 0.10 * vram_norm)`.
 - Normalization is robust and clamped (`time_norm`, `vram_norm` in `[0, 3]`).
 - Preferred metric source is miner-reported `result.json` fields:

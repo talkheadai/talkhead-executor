@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -18,6 +19,8 @@ from executor.verify import _http_json, signed_subnet_headers
 SUBNET_API_URL = os.getenv("SUBNET_API_URL", "https://subnet.talkhead.ai")
 
 PENALTY_SCORE = 0
+_BASE64_STD_RE = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
+_BASE64_URLSAFE_RE = re.compile(r"^[A-Za-z0-9\-_]*={0,2}$")
 
 class EvaluationLoop:
     def __init__(
@@ -69,7 +72,7 @@ class EvaluationLoop:
                     break
 
                 for miner in pending:
-                    print(f"Evaluating miner {miner.hotkey} {miner.image_ref}")
+                    logger.info(f"Evaluating miner {miner.hotkey} {miner.image_ref}")
                     logger.info(
                         f"evaluation start: hotkey={miner.hotkey} image_ref={miner.image_ref}"
                     )
@@ -141,11 +144,18 @@ def _decode_base64(raw: object) -> bytes | None:
     # Normalize padding to avoid accepting malformed payload silently.
     if len(s) % 4:
         s = s + ("=" * (4 - (len(s) % 4)))
-    for altchars in (None, b"-_"):
+    # Enforce alphabet family before decoding so urlsafe payloads
+    # cannot quietly fall back to the standard '+'/'/' alphabet.
+    if _BASE64_STD_RE.fullmatch(s):
         try:
-            return base64.b64decode(s, altchars=altchars, validate=True)
+            return base64.b64decode(s, validate=True)
         except (binascii.Error, ValueError):
-            continue
+            pass
+    if _BASE64_URLSAFE_RE.fullmatch(s):
+        try:
+            return base64.b64decode(s, altchars=b"-_", validate=True)
+        except (binascii.Error, ValueError):
+            pass
     return None
 
 
