@@ -255,7 +255,7 @@ def start_container(image_ref: str, job_dir: str) -> str:
         "--gpus",
         "all",
         "--network=none",
-        "--cpus=7",
+        "--cpus=8",
         "--memory=16g",
         "--pids-limit=256",
         "--read-only",
