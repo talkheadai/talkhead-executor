@@ -655,7 +655,6 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
             "efficiency_factor": eff.get("efficiency_factor"),
             "cap_violation": eff.get("cap_violation"),
         },
-        "updated_at": time.time(),
     }
     return final_score, metrics_payload
 
