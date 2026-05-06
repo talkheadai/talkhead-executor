@@ -23,6 +23,7 @@ WARMUP_COUNT = 2
 SCORING_COUNT = 5
 PULL_IMAGE_MAX_RETRIES = 5
 PULL_IMAGE_RETRY_SLEEP_SEC = 2.0
+PULL_IMAGE_TIMEOUT_SEC = 900
 EVALUATION_CONTAINER_LABEL = "talkhead.executor.evaluation=true"
 
 _ACTIVE_CONTAINERS: set[str] = set()
@@ -220,10 +221,12 @@ def _load_challenges(challenges_dir: str) -> list[Challenge]:
     return challenges
 
 
-def pull_image(image_ref: str) -> bool:
+def pull_image(image_ref: str, timeout_sec: int = PULL_IMAGE_TIMEOUT_SEC) -> bool:
     for attempt in range(1, PULL_IMAGE_MAX_RETRIES + 1):
         try:
-            subprocess.run(["docker", "pull", image_ref], check=True)
+            subprocess.run(
+                ["docker", "pull", image_ref], check=True, timeout=timeout_sec
+            )
             if attempt > 1:
                 logger.info(
                     f"docker pull succeeded on retry {attempt}/{PULL_IMAGE_MAX_RETRIES}: {image_ref}"
@@ -448,6 +451,9 @@ def build_image_ref(image_ref: str) -> str:
 
 
 def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
+    if image_ref == "blacklist":
+        return 0.0, {"error": "Blacklisted"}
+
     needed = WARMUP_COUNT + SCORING_COUNT
     if len(challenges) < needed:
         raise ValueError(f"Need at least {needed} challenges, found {len(challenges)}")
@@ -470,7 +476,7 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
     try:
         logger.info(f"pulling image: {image_ref}")
         if not pull_image(image_ref):
-            return 0.0, {"error": "docker_pull_failed"}
+            return 0.0, {"error": "Docker pull failed"}
         container_id = start_container(image_ref, str(job_dir))
         with _ACTIVE_CONTAINERS_LOCK:
             _ACTIVE_CONTAINERS.add(container_id)
