@@ -114,7 +114,7 @@ def upload_video_base64_to_r2(
             ContentType="video/mp4",
         )
     except (BotoCoreError, ClientError) as err:
-        logger.error("Failed to upload video to R2: %s", err)
+        logger.error(f"Failed to upload video to R2: {err}")
         return None
 
     return f"{public_base_url.rstrip('/')}/{object_key}"
