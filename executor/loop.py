@@ -86,14 +86,18 @@ class EvaluationLoop:
                             f"image_ref={miner.image_ref} error={exc}"
                         )
                         metrics_payload = {
-                            "image_ref": miner.image_ref,
-                            "quality_score": 0.0,
+                            "quality_score": float(PENALTY_SCORE),
                             "final_score": float(PENALTY_SCORE),
                             "challenge_metrics": [],
                             "error": str(exc),
-                            "updated_at": time.time(),
                         }
 
+                    metrics_payload = {
+                        **metrics_payload,
+                        "image_ref": miner.image_ref,
+                        "submit_time": miner.submit_time,
+                        "updated_at": time.time(),
+                    }
                     updated = self._state.set_evaluation_result(
                         hotkey=miner.hotkey,
                         image_ref=miner.image_ref,
