@@ -571,8 +571,11 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                                 "error": f"quality_scoring_failed: {exc}",
                             }
                         )
+                        return 0.0, {
+                            "error": f"quality_scoring_failed: {exc}",
+                            "challenge_metrics": challenge_metrics,
+                        }
                     finally:
-                        pass
                         _safe_remove(face_tmp)
                         _safe_remove(audio_tmp)
                 else:
@@ -588,6 +591,10 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                             "error": "output_video_missing",
                         }
                     )
+                    return 0.0, {
+                        "error": "output_video_missing",
+                        "challenge_metrics": challenge_metrics,
+                    }
             else:
                 challenge_metrics.append(
                     {
@@ -600,6 +607,10 @@ def evaluate(image_ref: str, challenges: list[Challenge]) -> tuple[float, dict]:
                         "error": result.error or "challenge_failed",
                     }
                 )
+                return 0.0, {
+                    "error": result.error or "challenge_failed",
+                    "challenge_metrics": challenge_metrics,
+                }
     finally:
         if container_id:
             stop_container(container_id)
