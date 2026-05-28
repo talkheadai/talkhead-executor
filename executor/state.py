@@ -11,6 +11,41 @@ from loguru import logger
 
 from executor.models import MinerMetricsResponse, MinerRecord, MinerSubmission
 
+ROUND_CONTINUE_TOP_K = 5
+_TERMINAL_ERRORS = frozenset({"Blacklisted", "Docker pull failed"})
+_DROPPED_FINAL_SCORE = 0.0
+
+
+def _metrics_error(metrics: dict[str, Any] | None) -> str | None:
+    if not isinstance(metrics, dict):
+        return None
+    raw_err = metrics.get("error")
+    return raw_err if isinstance(raw_err, str) else None
+
+
+def _metrics_final_score(metrics: dict[str, Any] | None) -> float | None:
+    if not isinstance(metrics, dict):
+        return None
+    raw_score = metrics.get("final_score")
+    if isinstance(raw_score, (int, float)):
+        return float(raw_score)
+    return None
+
+def _mark_dropped_from_competition(
+    metrics: dict[str, Any],
+    *,
+    top_final_score: float,
+) -> dict[str, Any]:
+    score = _metrics_final_score(metrics)
+    if score is None:
+        return metrics
+    updated = dict(metrics)
+    updated["dropped_from_competition"] = True
+    updated["final_score_diff_from_top"] = top_final_score - score
+    updated["round_final_score"] = score
+    updated["final_score"] = _DROPPED_FINAL_SCORE
+    return updated
+
 
 def _resolve_db_and_legacy_paths(state_file: Path) -> tuple[Path, Path | None]:
     if state_file.suffix.lower() == ".json":
@@ -314,8 +349,56 @@ class MinerState:
                 return False
             if any(record.coming_metrics is None for record in self._miners.values()):
                 return False
+
+            topk_candidates: list[tuple[float, float, str]] = []
             for record in self._miners.values():
-                record.metrics = record.coming_metrics
-                record.coming_metrics = None
+                next_metrics = record.coming_metrics
+                if not isinstance(next_metrics, dict):
+                    record.metrics = next_metrics
+                    record.coming_metrics = next_metrics
+                    continue
+
+                record.metrics = next_metrics
+                err = _metrics_error(next_metrics)
+                if err in _TERMINAL_ERRORS:
+                    record.coming_metrics = next_metrics
+                    continue
+
+                final_score = _metrics_final_score(next_metrics)
+                if final_score is not None:
+                    topk_candidates.append((final_score, record.submit_time, record.hotkey))
+                record.coming_metrics = next_metrics
+
+            topk_candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+            continue_hotkeys = {
+                hotkey for _, _, hotkey in topk_candidates[:ROUND_CONTINUE_TOP_K]
+            }
+            top_final_score = topk_candidates[0][0] if topk_candidates else None
+
+            for record in self._miners.values():
+                if record.hotkey in continue_hotkeys:
+                    record.coming_metrics = None
+                    continue
+
+                metrics = record.metrics
+                if not isinstance(metrics, dict):
+                    continue
+                if _metrics_error(metrics) in _TERMINAL_ERRORS:
+                    continue
+
+                round_score = _metrics_final_score(metrics)
+                if round_score is None:
+                    continue
+
+                if top_final_score is None:
+                    continue
+
+                dropped = _mark_dropped_from_competition(
+                    metrics,
+                    top_final_score=top_final_score,
+                )
+                record.metrics = dropped
+                record.coming_metrics = dropped
+
             self._save_locked(bump_metrics_version=True)
             return True
